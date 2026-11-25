@@ -32,9 +32,9 @@ jobs:
           - source: 18
             target: 19
             future: false
-          - source: 19
-            target: 20
-            future: true
+          #- source: 19
+          #  target: 20
+          #  future: true
     steps:
       - uses: actions/checkout@v4
         with:
