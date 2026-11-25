@@ -1,69 +1,129 @@
 name: PostgreSQL migration CI
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: "0 4 1 * 0"
+
 permissions:
   contents: read
+
 jobs:
   static-checks:
+    name: Static checks
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
       - name: Check Bash and command generator
         run: |
           bash -n migrate.sh
           bash -n tests/integration.sh
           node tests/generator.test.js
+
+  detect-versions:
+    name: Detect PostgreSQL versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    outputs:
+      source: ${{ steps.versions.outputs.source }}
+      target: ${{ steps.versions.outputs.target }}
+
+    steps:
+      - name: Detect latest PostgreSQL major version
+        id: versions
+        run: |
+          set -euo pipefail
+
+          echo "Pulling latest official PostgreSQL image..."
+          docker pull postgres:latest
+
+          VERSION=$(docker run --rm \
+            --network none \
+            --entrypoint postgres \
+            postgres:latest --version)
+
+          echo "Detected version: $VERSION"
+
+          if [[ "$VERSION" =~ ^postgres[[:space:]]\(PostgreSQL\)[[:space:]]([0-9]+)\.[0-9]+ ]]; then
+            TARGET="${BASH_REMATCH[1]}"
+          else
+            echo "::error::Unable to detect PostgreSQL major version."
+            exit 1
+          fi
+
+          SOURCE=$((TARGET - 1))
+
+          # The migration tool supports PostgreSQL 18+
+          if (( SOURCE < 18 )); then
+            echo "::error::Detected source version is unsupported."
+            exit 1
+          fi
+
+          echo "Source PostgreSQL version: $SOURCE"
+          echo "Target PostgreSQL version: $TARGET"
+
+          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## PostgreSQL migration versions"
+            echo ""
+            echo "| Component | Version |"
+            echo "|---|---|"
+            echo "| Source | $SOURCE |"
+            echo "| Target | $TARGET |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   integration:
-    name: PostgreSQL ${{ matrix.source }} to ${{ matrix.target }} (${{ matrix.mode }})
+    name: PostgreSQL ${{ needs.detect-versions.outputs.source }} to ${{ needs.detect-versions.outputs.target }} (${{ matrix.mode }})
+    needs: detect-versions
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
     strategy:
       fail-fast: false
       matrix:
         mode: [plain, encrypted]
-        source: [18, 19]
-        include:
-          - source: 18
-            target: 19
-            future: false
-          #- source: 19
-          #  target: 20
-          #  future: true
+
+    env:
+      SOURCE: ${{ needs.detect-versions.outputs.source }}
+      TARGET: ${{ needs.detect-versions.outputs.target }}
+      MODE: ${{ matrix.mode }}
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
       - name: Validate scripts
-        run: bash -n migrate.sh && bash -n tests/integration.sh
-      - name: Check official image availability
-        id: images
-        env:
-          SOURCE: ${{ matrix.source }}
-          TARGET: ${{ matrix.target }}
-          FUTURE: ${{ matrix.future }}
+        run: |
+          bash -n migrate.sh
+          bash -n tests/integration.sh
+
+      - name: Pull PostgreSQL images
         run: |
           set -euo pipefail
+
+          echo "Pulling source image: postgres:$SOURCE"
           docker pull "postgres:$SOURCE"
-          if docker pull "postgres:$TARGET" 2>pull-error.log; then
-            echo 'available=true' >> "$GITHUB_OUTPUT"
-          elif [[ "$FUTURE" == true ]] && grep -Eiq 'manifest unknown|manifest for .* not found|no such manifest' pull-error.log; then
-            echo "::notice::PostgreSQL $TARGET official image not published; future test deferred."
-            echo 'available=false' >> "$GITHUB_OUTPUT"
-            echo "Future test deferred: postgres:$TARGET not published." >> "$GITHUB_STEP_SUMMARY"
-          else
-            cat pull-error.log >&2
-            exit 1
-          fi
+
+          echo "Pulling target image: postgres:$TARGET"
+          docker pull "postgres:$TARGET"
+
       - name: Run real Docker migration and rollback tests
-        if: steps.images.outputs.available == 'true'
-        env:
-          SOURCE: ${{ matrix.source }}
-          TARGET: ${{ matrix.target }}
-          MODE: ${{ matrix.mode }}
-        run: bash tests/integration.sh "$SOURCE" "$TARGET" "$MODE"
+        run: |
+          set -euo pipefail
+
+          echo "Testing PostgreSQL $SOURCE -> $TARGET"
+          echo "Migration mode: $MODE"
+
+          bash tests/integration.sh "$SOURCE" "$TARGET" "$MODE"
