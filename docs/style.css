@@ -1,0 +1,123 @@
+/* SPDX-License-Identifier: LGPL-3.0-only */
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  line-height: 1.6;
+}
+body {
+  margin: 0;
+  background: light-dark(#f4f6f8, #101820);
+  color: light-dark(#172a3a, #e8eef3);
+}
+main {
+  max-width: 760px;
+  margin: auto;
+  padding: 2rem 1rem 4rem;
+}
+h1 {
+  font-size: clamp(1.7rem, 4vw, 2.5rem);
+  line-height: 1.2;
+  margin: 0.2rem 0;
+}
+h2 {
+  font-size: 1.25rem;
+}
+.eyebrow {
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  color: light-dark(#345b7b, #8bbce3);
+}
+a {
+  color: light-dark(#164f80, #9dceff);
+}
+fieldset,
+section {
+  border: 1px solid light-dark(#c5d2dc, #445462);
+  background: light-dark(#fff, #192630);
+  border-radius: 10px;
+  padding: 1rem 1.2rem;
+  margin: 1.2rem 0;
+  min-width: 0;
+}
+legend {
+  font-weight: 650;
+  padding: 0 0.4rem;
+}
+label {
+  display: block;
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin: 0.75rem 0;
+}
+input:not([type="checkbox"]),
+select,
+textarea {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.65rem;
+  margin: 0.25rem 0;
+  border: 1px solid light-dark(#a7bac9, #657584);
+  border-radius: 5px;
+  background: light-dark(#fafcfe, #101820);
+  color: inherit;
+  font: inherit;
+}
+textarea {
+  font-family: ui-monospace, monospace;
+  font-size: 0.9rem;
+  resize: vertical;
+}
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+.check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.note {
+  font-size: 0.9rem;
+}
+.check input {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+button {
+  font: inherit;
+  font-weight: 650;
+  background: #245b86;
+  color: white;
+  border: 0;
+  border-radius: 5px;
+  padding: 0.6rem 1.1rem;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible {
+  outline: 3px solid #4795cd;
+  outline-offset: 2px;
+}
+#status {
+  font-size: 0.9rem;
+  min-height: 1.4em;
+}
+code {
+  font-family: ui-monospace, monospace;
+}
+@media (max-width: 520px) {
+  .grid {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+}

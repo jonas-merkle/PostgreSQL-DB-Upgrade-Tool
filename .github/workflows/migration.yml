@@ -1,0 +1,69 @@
+name: PostgreSQL migration CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check Bash and command generator
+        run: |
+          bash -n migrate.sh
+          bash -n tests/integration.sh
+          node tests/generator.test.js
+  integration:
+    name: PostgreSQL ${{ matrix.source }} to ${{ matrix.target }} (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [plain, encrypted]
+        source: [18, 19]
+        include:
+          - source: 18
+            target: 19
+            future: false
+          - source: 19
+            target: 20
+            future: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate scripts
+        run: bash -n migrate.sh && bash -n tests/integration.sh
+      - name: Check official image availability
+        id: images
+        env:
+          SOURCE: ${{ matrix.source }}
+          TARGET: ${{ matrix.target }}
+          FUTURE: ${{ matrix.future }}
+        run: |
+          set -euo pipefail
+          docker pull "postgres:$SOURCE"
+          if docker pull "postgres:$TARGET" 2>pull-error.log; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          elif [[ "$FUTURE" == true ]] && grep -Eiq 'manifest unknown|manifest for .* not found|no such manifest' pull-error.log; then
+            echo "::notice::PostgreSQL $TARGET official image not published; future test deferred."
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            echo "Future test deferred: postgres:$TARGET not published." >> "$GITHUB_STEP_SUMMARY"
+          else
+            cat pull-error.log >&2
+            exit 1
+          fi
+      - name: Run real Docker migration and rollback tests
+        if: steps.images.outputs.available == 'true'
+        env:
+          SOURCE: ${{ matrix.source }}
+          TARGET: ${{ matrix.target }}
+          MODE: ${{ matrix.mode }}
+        run: bash tests/integration.sh "$SOURCE" "$TARGET" "$MODE"

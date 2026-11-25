@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'"
+    />
+    <title>PostgreSQL DB Upgrade Tool — Command generator</title>
+    <link rel="stylesheet" href="style.css" />
+    <script defer src="generator.js"></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">POSTGRESQL DB UPGRADE TOOL</p>
+        <h1>Migration command generator</h1>
+        <p>
+          Generate a Bash command for an offline database migration or backup. The generator does
+          not run commands or transmit your input. Do not enter passwords or private key contents.
+        </p>
+        <p>
+          <a href="https://github.com/jonas-merkle/postgresql-db-upgrade-tool"
+            >Repository and full documentation</a
+          >
+        </p>
+      </header>
+      <form id="generator" autocomplete="off">
+        <fieldset>
+          <legend>Database</legend>
+          <label
+            >Operation<select id="mode">
+              <option value="upgrade">Upgrade and back up</option>
+              <option value="backup">Backup only</option>
+            </select></label
+          >
+          <label
+            >Database root (absolute path)<input
+              id="source"
+              required
+              placeholder="/srv/docker/myapp/data/db"
+              value="/srv/docker/myapp/data/db"
+          /></label>
+          <div class="grid">
+            <label
+              >Source major version<input
+                id="sourceMajor"
+                type="number"
+                min="18"
+                max="999"
+                step="1"
+                value="18"
+                required /></label
+            ><label
+              >Target major version<input
+                id="targetMajor"
+                type="number"
+                min="19"
+                max="999"
+                step="1"
+                value="19"
+                required
+            /></label>
+          </div>
+          <div class="grid">
+            <label>PostgreSQL superuser<input id="role" required value="pgadmin" /></label
+            ><label
+              >Verification database<input
+                id="database"
+                pattern="[A-Za-z_][A-Za-z0-9_.\-]*"
+                value="appdb"
+                required
+            /></label>
+          </div>
+          <label
+            >Password file path (optional; otherwise prompted on host)<input
+              id="passwordFile"
+              placeholder="/home/user/secrets/postgres-password"
+          /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Storage and backup encryption</legend>
+          <label
+            >Working directory (optional, existing path on same mount)<input
+              id="workDir"
+              placeholder="/mnt/encrypted/migrations"
+          /></label>
+          <label class="check"
+            ><input id="requireEncrypted" type="checkbox" />Require a directly mounted dm-crypt
+            device</label
+          >
+          <label class="check"
+            ><input id="encrypt" type="checkbox" />Encrypt SQL backup with age</label
+          >
+          <div id="ageOptions" hidden>
+            <label
+              >Private identity file path (required for encrypted migration)<input
+                id="identity"
+                placeholder="/home/user/.config/pg-upgrade/age-identity.txt" /></label
+            ><label
+              >Public recipient key file path (optional when identity supplied)<input
+                id="recipientFile"
+                placeholder="/home/user/age-recipients.txt"
+            /></label>
+          </div>
+          <p class="note">
+            Vendor-specific TDE is not supported. For filesystem encryption, verify that the source,
+            working directory and final destination share the required encryption policy. The
+            generator does not validate Docker images or your host filesystem.
+          </p>
+        </fieldset>
+        <fieldset>
+          <legend>Execution</legend>
+          <label
+            >Startup timeout (seconds)<input
+              id="timeout"
+              type="number"
+              min="1"
+              max="99999"
+              step="1"
+              value="300"
+              required
+          /></label>
+        </fieldset>
+        <button type="submit">Generate command</button>
+      </form>
+      <section aria-labelledby="output-title">
+        <h2 id="output-title">Command</h2>
+        <p id="status" role="status" aria-live="polite"></p>
+        <textarea
+          id="output"
+          rows="12"
+          readonly
+          aria-label="Generated Bash command"
+          spellcheck="false"
+        ></textarea
+        ><button id="copy" type="button" disabled>Copy command</button>
+      </section>
+      <section>
+        <h2>Before execution</h2>
+        <ol>
+          <li>
+            Stop the source application and all writers with
+            <code>docker compose down</code> (without <code>-v</code>). Disable automated
+            redeployment.
+          </li>
+          <li>
+            Run the generated command from the migration repository on the local Docker host as the
+            non-root data owner.
+          </li>
+          <li>
+            On successful migration, update only the original PostgreSQL major image tag and
+            restart. On backup-only, leave the tag unchanged.
+          </li>
+          <li>Verify data and retain the old cluster until rollback is no longer needed.</li>
+        </ol>
+        <p>License: LGPL-3.0-only.</p>
+      </section>
+    </main>
+  </body>
+</html>

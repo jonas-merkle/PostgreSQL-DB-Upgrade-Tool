@@ -1,0 +1,101 @@
+# SPDX-License-Identifier: LGPL-3.0-only
+# Invoked by migrate.sh; all PostgreSQL tools run in official Docker images.
+services:
+  source:
+    image: postgres:${SOURCE_MAJOR:?}
+    user: "${RUN_UID:?}:${RUN_GID:?}"
+    restart: "no"
+    entrypoint: ["postgres"]
+    command:
+      [
+        "-D",
+        "/var/lib/postgresql/${SOURCE_MAJOR}/docker",
+        "-c",
+        "listen_addresses=*",
+        "-c",
+        "port=5432",
+        "-c",
+        "logging_collector=off",
+        "-c",
+        "log_destination=stderr",
+        "-c",
+        "archive_mode=off",
+      ]
+    environment:
+      TZ: ${MIGRATION_TZ:-Europe/Berlin}
+    volumes:
+      - type: bind
+        source: ${RUN_DIR:?}/source
+        target: /var/lib/postgresql
+        bind:
+          create_host_path: false
+    secrets: [source_password]
+    networks: [migration]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    shm_size: ${MIGRATION_SHM_SIZE:-256m}
+    stop_grace_period: 120s
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  target:
+    image: postgres:${TARGET_MAJOR:?}
+    user: "${RUN_UID:?}:${RUN_GID:?}"
+    restart: "no"
+    environment:
+      TZ: ${MIGRATION_TZ:-Europe/Berlin}
+      PGTZ: ${MIGRATION_TZ:-Europe/Berlin}
+      PGDATA: /var/lib/postgresql/${TARGET_MAJOR}/docker
+      POSTGRES_USER: ${BOOTSTRAP_ROLE:?}
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/bootstrap_password
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+    command:
+      [
+        "postgres",
+        "-c",
+        "listen_addresses=*",
+        "-c",
+        "port=5432",
+        "-c",
+        "logging_collector=off",
+        "-c",
+        "log_destination=stderr",
+        "-c",
+        "timezone=${MIGRATION_TZ:-Europe/Berlin}",
+        "-c",
+        "log_timezone=${MIGRATION_TZ:-Europe/Berlin}",
+        "-c",
+        "password_encryption=scram-sha-256",
+        "-c",
+        "log_statement=none",
+      ]
+    volumes:
+      - type: bind
+        source: ${RUN_DIR:?}/target
+        target: /var/lib/postgresql
+        bind:
+          create_host_path: false
+    secrets: [source_password, bootstrap_password]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,mode=3775,uid=${RUN_UID:?},gid=${RUN_GID:?}
+    networks: [migration]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    shm_size: ${MIGRATION_SHM_SIZE:-256m}
+    stop_grace_period: 120s
+    logging: *logging
+secrets:
+  source_password:
+    file: ${RUN_DIR:?}/private/source-password
+  bootstrap_password:
+    file: ${RUN_DIR:?}/private/bootstrap-password
+networks:
+  migration:
+    driver: bridge
+    internal: true
