@@ -7,7 +7,7 @@ on:
     branches: [main]
   workflow_dispatch:
   schedule:
-    - cron: "0 4 1 * 0"
+    - cron: "0 4 1 * *"
 
 permissions:
   contents: read
@@ -84,7 +84,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   integration:
-    name: PostgreSQL ${{ needs.detect-versions.outputs.source }} to ${{ needs.detect-versions.outputs.target }} (${{ matrix.mode }})
+    name: PostgreSQL ${{ needs.detect-versions.outputs.source }} to ${{ needs.detect-versions.outputs.target }} (${{ matrix.mode }}, ${{ matrix.ownership }})
     needs: detect-versions
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -93,11 +93,13 @@ jobs:
       fail-fast: false
       matrix:
         mode: [plain, encrypted]
+        ownership: ["host", "999:999", "999:0", "1000:1000"]
 
     env:
       SOURCE: ${{ needs.detect-versions.outputs.source }}
       TARGET: ${{ needs.detect-versions.outputs.target }}
       MODE: ${{ matrix.mode }}
+      OWNERSHIP: ${{ matrix.ownership }}
 
     steps:
       - uses: actions/checkout@v7
@@ -124,6 +126,6 @@ jobs:
           set -euo pipefail
 
           echo "Testing PostgreSQL $SOURCE -> $TARGET"
-          echo "Migration mode: $MODE"
+          echo "Migration mode: $MODE; database ownership: $OWNERSHIP"
 
-          bash tests/integration.sh "$SOURCE" "$TARGET" "$MODE"
+          bash tests/integration.sh "$SOURCE" "$TARGET" "$MODE" "$OWNERSHIP"

@@ -22,7 +22,7 @@
           not run commands or transmit your input. Do not enter passwords or private key contents.
         </p>
         <p>
-          <a href="https://github.com/jonas-merkle/postgresql-db-upgrade-tool"
+          <a href="https://github.com/jonas-merkle/PostgreSQL-DB-Upgrade-Tool"
             >Repository and full documentation</a
           >
         </p>
@@ -147,8 +147,9 @@
             redeployment.
           </li>
           <li>
-            Run the generated command from the migration repository on the local Docker host as the
-            non-root data owner.
+            Run the generated command from the migration repository on the local Docker host as a
+            non-root user with Docker access. Database file ownership is detected automatically; do
+            not change the original permissions. The database root must be writable for upgrades.
           </li>
           <li>
             On successful migration, update only the original PostgreSQL major image tag and

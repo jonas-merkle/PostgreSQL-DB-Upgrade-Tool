@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Invoked by migrate.sh; all PostgreSQL tools run in official Docker images.
+# RUN_UID/GID identify the host launcher and private working clusters, not
+# necessarily the original database owner. The launcher restores production
+# PGDATA ownership on the staged target before atomic publication.
 services:
   source:
     image: postgres:${SOURCE_MAJOR:?}
@@ -51,7 +54,7 @@ services:
       POSTGRES_USER: ${BOOTSTRAP_ROLE:?}
       POSTGRES_DB: postgres
       POSTGRES_PASSWORD_FILE: /run/secrets/bootstrap_password
-      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256 ${TARGET_INITDB_GROUP_ARG:-}"
       POSTGRES_HOST_AUTH_METHOD: scram-sha-256
     command:
       [

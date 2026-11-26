@@ -14,7 +14,8 @@ Usage: ./migrate.sh --source /absolute/path/to/data/db --source-major 18 --targe
                      [--encryption-key-file /path/recipients.txt | --encryption-recipient age1...]] \
                     [--require-encrypted-storage] [--backup-only]
 
-Run as the non-root owner of the source data.
+Run as a non-root host user with local Docker access and writable publication parent.
+Database ownership is detected automatically and preserved on the published target.
 Backup-only requires no target version or target image.
 Supports stock PostgreSQL and pgcrypto column encryption; vendor TDE is not supported.
 Stop the original PostgreSQL and all writers before running. No automatic cutover.
@@ -72,40 +73,79 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 SOURCE_PATH=$(realpath -e -- "$SOURCE_PATH")
 [[ -d $SOURCE_PATH && $SOURCE_PATH != / ]] || fail 'Invalid source directory.'
 RUN_UID=$(id -u); RUN_GID=$(id -g)
-[[ $RUN_UID != 0 ]] || fail 'Do not run as root; use the host account owning the database.'
-[[ $(stat -c '%u:%g' "$SOURCE_PATH") == "$RUN_UID:$RUN_GID" ]] || fail 'Source directory owner must match the current UID/GID.'
-shopt -s nullglob
-versions=("$SOURCE_PATH"/*/docker/PG_VERSION)
-if [[ -z $SOURCE_MAJOR ]]; then
-  ((${#versions[@]} == 1)) || fail 'Multiple or no clusters found; specify --source-major explicitly.'
-  SOURCE_MAJOR=$(cat -- "${versions[0]}")
-fi
-[[ $SOURCE_MAJOR =~ ^[1-9][0-9]{1,2}$ && $SOURCE_MAJOR -ge 18 ]] || fail 'Require source >= 18.'
-# Backup mode uses the source client; a target image is neither pulled nor started.
+[[ $RUN_UID != 0 ]] || fail 'Do not run as root; use a non-root account with Docker access.'
+[[ -z $SOURCE_MAJOR || $SOURCE_MAJOR =~ ^[1-9][0-9]{1,2}$ ]] || fail 'Invalid source major.'
+# Validate the daemon before granting any helper access to host paths.
+docker compose version >/dev/null
+endpoint=${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}
+[[ $endpoint == unix://* ]] || fail 'A local Unix-socket Docker daemon is required.'
+security=$(docker info --format '{{json .SecurityOptions}}')
+[[ $security != *rootless* && $security != *userns* ]] || fail 'Rootless Docker and user namespace remapping are not supported.'
+# Lock outside the database tree. The host needs access to the parent, not PGDATA.
+LOCK_FILE="$(dirname "$SOURCE_PATH")/.pg-migration-$(printf '%s' "$SOURCE_PATH" | sha256sum | cut -c1-24).lock"
+exec 9>"$LOCK_FILE"
+flock -n 9 || fail 'Another migration holds the lock for this data directory.'
+log 'Pulling isolated filesystem helper (Alpine latest)'
+docker pull alpine:latest >&2
+HELPER=(docker run --rm --network none --user 0:0 --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges --read-only)
+# Mount the original recursively read-only. Require kernel/Engine support; never
+# fall back to a potentially writable nested mount.
+SOURCE_MOUNT=(--mount "type=bind,source=$SOURCE_PATH,target=/original,readonly,bind-recursive=readonly")
+source_probe() {
+  "${HELPER[@]}" "${SOURCE_MOUNT[@]}" --entrypoint sh alpine:latest -eu -c '
+    die() { echo "ERROR: $*" >&2; exit 1; }
+    major=$1
+    if [ -z "$major" ]; then
+      count=0
+      for d in /original/*; do
+        [ ! -L "$d" ] && [ -d "$d" ] || continue
+        n=${d##*/}
+        case "$n" in *[!0-9]*|"") continue;; esac
+        [ ! -L "$d/docker" ] && [ -d "$d/docker" ] && [ -f "$d/docker/PG_VERSION" ] || continue
+        count=$((count+1)); major=$n
+      done
+      [ "$count" = 1 ] || die "Multiple or no clusters found; specify --source-major explicitly."
+    fi
+    parent=/original/$major; data=$parent/docker
+    [ ! -L "$parent" ] && [ ! -L "$data" ] && [ -d "$data" ] || die "Expected non-symlinked source directory: $data"
+    [ ! -L "$data/PG_VERSION" ] && [ -f "$data/PG_VERSION" ] || die "Missing or invalid source PG_VERSION."
+    actual=$(cat "$data/PG_VERSION") || die "Cannot read source PG_VERSION."
+    [ "$actual" = "$major" ] || die "Source PG_VERSION ($actual) does not match $major."
+    # Reject any nested mount in the selected version tree (including bind mounts).
+    ! grep -Eq "^[^ ]+ [^ ]+ [^ ]+ [^ ]+ $parent(/| )" /proc/self/mountinfo || die "Nested mounts in source version are unsupported."
+    [ ! -e "$data/postmaster.pid" ] || die "postmaster.pid exists; stop PostgreSQL cleanly first. Do not delete it manually."
+    [ ! -e "$data/standby.signal" ] && [ ! -e "$data/recovery.signal" ] || die "Standby/recovery clusters are unsupported."
+    bad=$(find "$data" ! -type d ! -type f -print -quit) || die "Cannot inspect source tree."
+    [ -z "$bad" ] || die "Symlinks and special files in PGDATA are unsupported: $bad"
+    printf "%s " "$major"
+    stat -c "%u %g %a" "$data" | tr "\n" " "
+    stat -c "%u %g %a" "$parent"
+  ' sh "$1"
+}
+metadata=$(source_probe "$SOURCE_MAJOR") || fail 'Read-only source inspection failed; check the diagnostic above.'
+read -r SOURCE_MAJOR DATA_UID DATA_GID DATA_MODE PARENT_UID PARENT_GID PARENT_MODE extra <<< "$metadata"
+[[ -z $extra && $SOURCE_MAJOR =~ ^[1-9][0-9]{1,2}$ && $SOURCE_MAJOR -ge 18 ]] || fail 'Require source >= 18.'
+for n in "$DATA_UID" "$DATA_GID" "$PARENT_UID" "$PARENT_GID"; do [[ $n =~ ^[0-9]+$ ]] || fail 'Invalid ownership metadata.'; done
+[[ $DATA_UID != 0 && $DATA_MODE =~ ^(700|750)$ && $PARENT_MODE =~ ^[0-7]{3,4}$ ]] || fail 'Unsupported PGDATA owner or mode (require non-root owner and 700/750).'
 if ((BACKUP_ONLY)); then TARGET_MAJOR=$SOURCE_MAJOR; else
   [[ $TARGET_MAJOR =~ ^[1-9][0-9]{1,2}$ && $TARGET_MAJOR -gt $SOURCE_MAJOR ]] || fail 'Require target > source.'
 fi
 SOURCE_DATA="$SOURCE_PATH/$SOURCE_MAJOR/docker"
 FINAL_DIR="$SOURCE_PATH/$TARGET_MAJOR"
-[[ -f $SOURCE_DATA/PG_VERSION && $(cat "$SOURCE_DATA/PG_VERSION") == "$SOURCE_MAJOR" ]] || fail 'Source PG_VERSION missing or mismatched.'
-if ((!BACKUP_ONLY)); then [[ ! -e $FINAL_DIR && ! -L $FINAL_DIR ]] || fail "Target already exists: $FINAL_DIR; refusing to overwrite it."; fi
-[[ -w $SOURCE_PATH && -x $SOURCE_PATH ]] || fail 'Source parent must allow publishing a new version directory.'
-# Lock outside the database tree. All invocations for this root use the same lock.
-LOCK_FILE="$(dirname "$SOURCE_PATH")/.pg-migration-$(printf '%s' "$SOURCE_PATH" | sha256sum | cut -c1-24).lock"
-exec 9>"$LOCK_FILE"
-flock -n 9 || fail 'Another migration holds the lock for this data directory.'
-[[ $(realpath -e "$SOURCE_DATA") == "$SOURCE_DATA" ]] || fail 'Symlinked data directory is not supported.'
-[[ $(stat -c '%u:%g' "$SOURCE_DATA") == "$RUN_UID:$RUN_GID" ]] || fail 'PGDATA ownership does not match the current UID/GID.'
-[[ ! -e $SOURCE_DATA/postmaster.pid ]] || fail 'postmaster.pid exists; stop PostgreSQL cleanly first. Do not delete it manually.'
-[[ -z $(find "$SOURCE_DATA" -type l -print -quit) ]] || fail 'Symlinks (including external tablespaces/WAL) are unsupported.'
+if ((!BACKUP_ONLY)); then
+  [[ -w $SOURCE_PATH && -x $SOURCE_PATH ]] || fail 'Database root must allow publishing a new version directory; no access to PGDATA itself is required.'
+  [[ ! -e $FINAL_DIR && ! -L $FINAL_DIR ]] || fail "Target already exists: $FINAL_DIR; refusing to overwrite it."
+fi
 OUTPUT_PARENT=${OUTPUT_PARENT:-$(dirname -- "$SOURCE_PATH")}
 OUTPUT_PARENT=$(realpath -e -- "$OUTPUT_PARENT")
 [[ -d $OUTPUT_PARENT && $OUTPUT_PARENT != "$SOURCE_PATH" && $OUTPUT_PARENT != "$SOURCE_PATH/"* ]] || fail 'Output must be outside the source directory.'
 [[ $(stat -c %d "$OUTPUT_PARENT") == "$(stat -c %d "$SOURCE_PATH")" ]] || fail 'Output and database root must be on the same filesystem for atomic publication.'
-[[ $(findmnt -n -o ID -T "$OUTPUT_PARENT") == "$(findmnt -n -o ID -T "$SOURCE_PATH")" ]] || fail 'Output and database root must be on the same Linux mount for atomic publication.'
+output_mount=$(findmnt -n -o ID -T "$OUTPUT_PARENT") || fail 'Cannot determine workspace mount.'
+source_mount=$(findmnt -n -o ID -T "$SOURCE_PATH") || fail 'Cannot determine database root mount.'
+[[ -n $output_mount && $output_mount == "$source_mount" ]] || fail 'Output and database root must be on the same Linux mount for atomic publication.'
 if ((REQUIRE_ENCRYPTED)); then
   command -v lsblk >/dev/null || fail 'lsblk required for encrypted storage verification.'
-  for path in "$SOURCE_DATA" "$SOURCE_PATH" "$OUTPUT_PARENT"; do
+  for path in "$SOURCE_PATH" "$OUTPUT_PARENT"; do
     device=$(findmnt -n -o SOURCE -T "$path")
     [[ -b $device ]] || fail "Cannot verify encrypted block storage for $path ($device)."
     [[ $(lsblk -dn -o TYPE "$device") == crypt ]] || fail "Not a directly mounted dm-crypt device: $path. Cannot certify this storage configuration."
@@ -114,15 +154,6 @@ if ((REQUIRE_ENCRYPTED)); then
 fi
 MV_OPTS=(-T -n)
 if mv --help | grep -q -- '--no-copy'; then MV_OPTS+=(--no-copy); fi
-[[ ! -e $SOURCE_DATA/standby.signal && ! -e $SOURCE_DATA/recovery.signal ]] || fail 'Standby/recovery clusters are unsupported.'
-[[ -z $(find "$SOURCE_DATA" ! -type d ! -type f -print -quit) ]] || fail 'Special files in PGDATA are unsupported.'
-
-# Docker must be local, rootful and without user namespace remapping.
-docker compose version >/dev/null
-endpoint=${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}
-[[ $endpoint == unix://* ]] || fail 'A local Unix-socket Docker daemon is required.'
-security=$(docker info --format '{{json .SecurityOptions}}')
-[[ $security != *rootless* && $security != *userns* ]] || fail 'Rootless Docker and user namespace remapping are not supported.'
 check_offline() {
   local ids id mounts m canonical
   ids=$(docker ps -q) || fail 'Cannot enumerate Docker containers.'
@@ -136,9 +167,11 @@ check_offline() {
       fi
     done <<< "$mounts"
   done
-  [[ ! -e $SOURCE_DATA/postmaster.pid ]] || fail 'Source is not offline.'
+  local current
+  current=$(source_probe "$SOURCE_MAJOR") || fail 'Source is not offline or no longer valid.'
+  [[ $current == "$metadata" ]] || fail 'Source ownership, permissions or version changed unexpectedly.'
 }
-log "Preflight: PostgreSQL $SOURCE_MAJOR; source root $SOURCE_PATH; host UID/GID $RUN_UID:$RUN_GID"
+log "Preflight: PostgreSQL $SOURCE_MAJOR; source root $SOURCE_PATH; host UID/GID $RUN_UID:$RUN_GID; original PGDATA UID/GID $DATA_UID:$DATA_GID"
 if ((BACKUP_ONLY)); then log 'Mode: backup only (no target database)'; else log "Mode: upgrade to PostgreSQL $TARGET_MAJOR"; fi
 log 'Checking for running containers with overlapping mounts and PostgreSQL PID file'
 check_offline
@@ -160,7 +193,9 @@ mkdir -m 700 -- "$RUN_DIR/source/$SOURCE_MAJOR"
 random_hex() { od -An -N "$1" -tx1 /dev/urandom | tr -d ' \n'; }
 BOOTSTRAP_ROLE="migration_$(random_hex 12)"
 PROJECT="pgmigrate-$(random_hex 8)"
-export RUN_DIR RUN_UID RUN_GID SOURCE_MAJOR TARGET_MAJOR BOOTSTRAP_ROLE
+TARGET_INITDB_GROUP_ARG=
+if [[ $DATA_MODE == 750 ]]; then TARGET_INITDB_GROUP_ARG=--allow-group-access; fi
+export RUN_DIR RUN_UID RUN_GID SOURCE_MAJOR TARGET_MAJOR BOOTSTRAP_ROLE TARGET_INITDB_GROUP_ARG
 export MIGRATION_TZ=${MIGRATION_TZ:-Europe/Berlin} MIGRATION_SHM_SIZE=${MIGRATION_SHM_SIZE:-256m}
 DC=(docker compose --project-name "$PROJECT" --env-file /dev/null -f "$SCRIPT_DIR/compose.yaml")
 started=0
@@ -174,20 +209,26 @@ cleanup() {
     "${DC[@]}" down --timeout 120 >> "$RUN_DIR/cleanup.log" 2>&1 || down_ok=0
   fi
   # A failure never removes a published directory, or any original data.
-  if [[ ! -e $RUN_DIR/target/$TARGET_MAJOR && -f $FINAL_DIR/docker/PG_VERSION && $(cat "$FINAL_DIR/docker/PG_VERSION") == "$TARGET_MAJOR" ]] && ((published)); then
+  if ((published)); then
     printf 'Target published: %s\n' "$FINAL_DIR" >&2
   fi
   if ((down_ok)); then
     rm -f -- "$RUN_DIR/private/source-password" "$RUN_DIR/private/bootstrap-password"
     rmdir -- "$RUN_DIR/private" 2>/dev/null
     # Only remove disposable copies inside the private run directory.
-    rm -rf -- "$RUN_DIR/source" "$RUN_DIR/target"
+    if ! rm -rf -- "$RUN_DIR/source" "$RUN_DIR/target"; then
+      # Ownership may have been restored on the staged target before a failure.
+      # Mount only the disposable workspace, never the production root.
+      if ! "${HELPER[@]}" --cap-add FOWNER --mount "type=bind,source=$RUN_DIR,target=/work" --entrypoint sh alpine:latest -eu -c 'rm -rf /work/source /work/target' >> "$RUN_DIR/cleanup.log" 2>&1; then
+        printf 'WARNING: disposable workspace cleanup failed: %s\n' "$RUN_DIR" >&2; rc=1
+      fi
+    fi
     rm -f -- "$RUN_DIR/cluster.sql.part" "$RUN_DIR/cluster.sql.age.part"
   else
     printf 'WARNING: cleanup failed. Containers or secrets may remain OUTSIDE the production root. Project: %s\n' "$PROJECT" >&2; rc=1
   fi
   if ((rc)); then
-    if [[ -f $FINAL_DIR/docker/PG_VERSION && ! -e $RUN_DIR/target/$TARGET_MAJOR && -f $RUN_DIR/READY.txt ]]; then
+    if ((published)) || [[ -d $FINAL_DIR && ! -e $RUN_DIR/target/$TARGET_MAJOR && -f $RUN_DIR/READY.txt ]]; then
       printf 'Publication may already have completed. Inspect %s and %s before restarting.\n' "$FINAL_DIR" "$RUN_DIR" >&2
     else
       printf 'Migration FAILED; no target was published by this run. Original version untouched. Diagnostics: %s\n' "$RUN_DIR" >&2
@@ -237,11 +278,14 @@ if ((ENCRYPT)); then
 fi
 check_offline
 log 'Copying stopped source cluster (independent copy, not hard links)'
-docker run --rm --network none --user "$RUN_UID:$RUN_GID" --cap-drop ALL \
-  --security-opt no-new-privileges --read-only \
-  --mount "type=bind,source=$SOURCE_DATA,target=/original,readonly" \
+# Normalize only the independent copy to the host UID/GID. Temporary servers,
+# credentials, age helper, and diagnostics can retain the existing host identity.
+"${HELPER[@]}" --cap-add CHOWN --cap-add FOWNER "${SOURCE_MOUNT[@]}" \
   --mount "type=bind,source=$RUN_DIR/source/$SOURCE_MAJOR,target=/copy" \
-  --entrypoint cp "postgres:$SOURCE_MAJOR" -a --reflink=auto /original /copy/docker
+  --entrypoint sh "postgres:$SOURCE_MAJOR" -eu -c '
+    cp -a --reflink=auto -- "/original/$1/docker" /copy/docker
+    chown -R -- "$2:$3" /copy/docker
+  ' sh "$SOURCE_MAJOR" "$RUN_UID" "$RUN_GID"
 check_offline
 log 'Checking clean shutdown state on the copied source'
 control_state() {
@@ -389,12 +433,33 @@ grep -Eq '^Database cluster state:[[:space:]]+shut down$' "$RUN_DIR/target-contr
 log 'Checking offline status again before publishing'
 check_offline
 [[ ! -e $FINAL_DIR && ! -L $FINAL_DIR ]] || fail 'Target directory appeared during migration; refusing to overwrite.'
-[[ $(cat "$SOURCE_DATA/PG_VERSION") == "$SOURCE_MAJOR" ]] || fail 'Source version changed unexpectedly.'
+# Restore production ownership on the verified staged target, not on the original.
+# Keep the enclosing major directory owned by the launcher so an unprivileged
+# same-filesystem rename can update its parent. Only PGDATA needs the database
+# identity. Permit traversal by the database UID without exposing PGDATA.
+TARGET_PARENT_MODE=700
+if [[ $DATA_UID != "$RUN_UID" ]]; then TARGET_PARENT_MODE=711; fi
+if [[ $PARENT_MODE == 755 ]]; then TARGET_PARENT_MODE=755; fi
+log "Preparing target PGDATA ownership $DATA_UID:$DATA_GID; major directory $RUN_UID:$RUN_GID mode $TARGET_PARENT_MODE"
+"${HELPER[@]}" --cap-add CHOWN --cap-add FOWNER \
+  --mount "type=bind,source=$RUN_DIR/target/$TARGET_MAJOR,target=/staged" \
+  --entrypoint sh alpine:latest -eu -c '
+    chown -R "$1:$2" /staged/docker
+    chmod "$3" /staged/docker
+    # initdb was given --allow-group-access for a source mode of 750; do
+    # not blanket-widen the generated individual file permissions.
+    chown "$4:$5" /staged
+    chmod "$6" /staged
+    [ "$(stat -c "%u:%g:%a" /staged/docker)" = "$1:$2:$3" ]
+    [ "$(stat -c "%u:%g:%a" /staged)" = "$4:$5:$6" ]
+  ' sh "$DATA_UID" "$DATA_GID" "$DATA_MODE" "$RUN_UID" "$RUN_GID" "$TARGET_PARENT_MODE"
 (cd "$RUN_DIR" && sha256sum -c "$BACKUP_NAME.sha256")
 cat > "$RUN_DIR/READY.txt" <<REPORT
 Logical migration verified: PostgreSQL $SOURCE_MAJOR -> $TARGET_MAJOR
 Original data: $SOURCE_PATH/$SOURCE_MAJOR (not modified)
 New directory: $FINAL_DIR
+Published PGDATA UID:GID and mode: $DATA_UID:$DATA_GID $DATA_MODE
+Published major directory UID:GID and mode: $RUN_UID:$RUN_GID $TARGET_PARENT_MODE
 SQL backup: $RUN_DIR/$BACKUP_NAME
 Temporary bootstrap role: $BOOTSTRAP_ROLE (NOLOGIN, password removed)
 Checks: dump/restore exit status, version, database and role inventory, original credentials, role password/validity and memberships, statistics, clean shutdown and ownership.
@@ -402,9 +467,9 @@ REPORT
 # Commit point: same-filesystem atomic rename, no overwrite. GNU mv -n can
 # return success when skipping, so also check that staging actually moved.
 log "Publishing $FINAL_DIR (leaving $SOURCE_PATH/$SOURCE_MAJOR untouched)"
-sync -f "$RUN_DIR/target/$TARGET_MAJOR"
+sync -f "$RUN_DIR/target"
 mv "${MV_OPTS[@]}" -- "$RUN_DIR/target/$TARGET_MAJOR" "$FINAL_DIR"
-[[ ! -e $RUN_DIR/target/$TARGET_MAJOR && -f $FINAL_DIR/docker/PG_VERSION ]] || fail 'Publication was skipped; target may already exist.'
+[[ ! -e $RUN_DIR/target/$TARGET_MAJOR && -d $FINAL_DIR ]] || fail 'Publication was skipped; target may already exist.'
 published=1
 printf '\nSUCCESS: PostgreSQL %s -> %s\n' "$SOURCE_MAJOR" "$TARGET_MAJOR"
 cat "$RUN_DIR/READY.txt"

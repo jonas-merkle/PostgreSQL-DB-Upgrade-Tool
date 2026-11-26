@@ -13,20 +13,22 @@ The JavaScript tests exercise version validation, backup-only mode, age option v
 ## Docker integration tests
 
 ```bash
-bash tests/integration.sh 18 19 plain
-bash tests/integration.sh 18 19 encrypted
-bash tests/integration.sh 19 20 plain
-bash tests/integration.sh 19 20 encrypted
+bash tests/integration.sh 18 19 plain host
+bash tests/integration.sh 18 19 encrypted host
+bash tests/integration.sh 18 19 plain 999:0
+bash tests/integration.sh 18 19 encrypted 999:0
 ```
 
-Use a Linux host with local rootful Docker, a non-root account with Docker access and published official major-version images. The test fixture is disposable. CI triggers on pushes and pull requests to main and manual dispatch. Future target tests defer only on a missing official image manifest.
+The optional fourth argument selects the fixture database UID/GID (`host` by default, or a numeric `UID:GID`). CI tests `host`, `999:999`, `999:0` and `1000:1000` in both modes. The fixture has a root-owned major directory (755) and a restrictive PostgreSQL data directory (700). When the database UID differs from the host, the tests assert that the host cannot read `PG_VERSION` directly.
 
-The integration suite checks original-file fingerprints, failed credentials, backup-only without a target version, encrypted backup verification and wrong age identities, role and grant preservation, multiple databases, identity sequences, pgcrypto ciphertext equality and decryption, destination startup, overwrite refusal and original-cluster rollback. No production data or keys are required.
+Use a Linux host (kernel 5.12+) with local rootful Docker supporting recursive read-only bind mounts, a non-root account with Docker access and published official PostgreSQL major-version images. The fixture is disposable. CI detects the latest stable major and the preceding major on pushes and pull requests to main, manual dispatch and monthly schedules. Missing required images fail the workflow.
 
-## Release criteria and current verification status
+The integration suite checks original file fingerprints (bytes, ownership and modes), source-version auto-detection through restricted files, failed credentials, backup-only without a target, encrypted backup verification and wrong age identities, role/grant preservation, multiple databases, sequences, pgcrypto ciphertext/decryption, target PGDATA owner/mode, target startup under the original UID/GID, overwrite refusal and rollback. No production data or keys are required.
+
+## Release criteria
 
 - Bash syntax, YAML parsing and JavaScript unit tests are local static checks.
-- Live Docker integration must pass on the intended major versions before claiming runtime compatibility. No live integration result is included with this source archive.
+- Live Docker integration must pass on the intended major versions before claiming runtime compatibility.
 - Rehearse with a disposable copy of the actual production database and its original Compose security configuration before upgrading.
 - Test `--require-encrypted-storage` on the actual encrypted mount. No universal filesystem-encryption or TDE certification is provided.
-- For new major releases, confirm the official image layout, review PostgreSQL release notes and inspect CI results. Do not advertise untested vendor TDE adapters.
+- For new major releases, confirm the official image layout, review PostgreSQL release notes and inspect CI results. Vendor-specific TDE is outside the supported scope.
