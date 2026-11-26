@@ -90,7 +90,7 @@ docker pull alpine:latest >&2
 HELPER=(docker run --rm --network none --user 0:0 --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges --read-only)
 # Mount the original recursively read-only. Require kernel/Engine support; never
 # fall back to a potentially writable nested mount.
-SOURCE_MOUNT=(--mount "type=bind,source=$SOURCE_PATH,target=/original,readonly,bind-recursive=readonly")
+SOURCE_MOUNT=(--mount "type=bind,source=$SOURCE_PATH,target=/original,readonly,bind-recursive=readonly,bind-propagation=rprivate")
 source_probe() {
   "${HELPER[@]}" "${SOURCE_MOUNT[@]}" --entrypoint sh alpine:latest -eu -c '
     die() { echo "ERROR: $*" >&2; exit 1; }

@@ -13,7 +13,7 @@ if [[ $ownership != host ]]; then db_uid=${ownership%:*}; db_gid=${ownership#*:}
 # Fixture helpers deliberately access the protected cluster via Docker, not sudo.
 FIXTURE=(docker run --rm --network none --user 0:0 --cap-drop ALL --cap-add DAC_OVERRIDE --cap-add CHOWN --cap-add FOWNER --security-opt no-new-privileges --read-only)
 fixture() { "${FIXTURE[@]}" --mount "type=bind,source=$root/db,target=/db" --entrypoint bash "postgres:$source_major" -euo pipefail -c "$@"; }
-fixture_ro() { "${FIXTURE[@]}" --mount "type=bind,source=$root/db,target=/db,readonly,bind-recursive=readonly" --entrypoint bash "postgres:$source_major" -euo pipefail -c "$@"; }
+fixture_ro() { "${FIXTURE[@]}" --mount "type=bind,source=$root/db,target=/db,readonly,bind-recursive=readonly,bind-propagation=rprivate" --entrypoint bash "postgres:$source_major" -euo pipefail -c "$@"; }
 cleanup() { rc=$?; trap - EXIT; docker logs "$name" >&2 2>/dev/null || true; docker rm -f "$name" >/dev/null 2>&1 || true; if ((rc)); then echo "Test failed; diagnostics in $root" >&2; find "$root" -path "$root/db" -prune -o \( -name 'restore.log' -o -name 'readiness.log' \) -print | while read -r f; do tail -n 40 "$f"; done; else fixture 'rm -rf /db/*' && rm -rf "$root" || rc=1; fi; exit "$rc"; }
 trap cleanup EXIT
 mkdir -m 755 "$root/db"; printf '%s' 'ci-test-password-123' > "$root/password"
