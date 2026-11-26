@@ -2,7 +2,7 @@
 # Invoked by migrate.sh; all PostgreSQL tools run in official Docker images.
 # RUN_UID/GID identify the host launcher and private working clusters, not
 # necessarily the original database owner. The launcher restores production
-# PGDATA ownership on the staged target before atomic publication.
+# major-directory and PGDATA ownership and modes before atomic publication.
 services:
   source:
     image: postgres:${SOURCE_MAJOR:?}

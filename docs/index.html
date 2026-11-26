@@ -83,7 +83,7 @@
         <fieldset>
           <legend>Storage and backup encryption</legend>
           <label
-            >Working directory (optional, existing path on same mount)<input
+            >Working directory (optional; same mount, shared non-root ancestor for upgrades)<input
               id="workDir"
               placeholder="/mnt/encrypted/migrations"
           /></label>
@@ -156,8 +156,9 @@
           </li>
           <li>
             Run the generated command from the migration repository on the local Docker host as a
-            non-root user with Docker access. Database file ownership is detected automatically; do
-            not change the original permissions. The database root must be writable for upgrades.
+            non-root user with Docker access. Ownership and permission modes of both the major
+            directory and PGDATA are preserved automatically; do not change the original
+            permissions. The database root must be writable for upgrades.
           </li>
           <li>
             On successful migration, update only the original PostgreSQL major image tag and

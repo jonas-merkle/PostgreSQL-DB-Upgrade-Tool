@@ -68,24 +68,24 @@ Temporary copies and credentials are removed during normal cleanup. Failed migra
 
 ## CLI options
 
-| Option                        | Meaning                                                                                                                                     |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--source PATH`               | Required. Root of the original bind mount, not the `18` or `docker` subdirectory.                                                           |
-| `--source-major N`            | Explicit source major, required when multiple versions remain; otherwise auto-detected.                                                     |
-| `--target-major N`            | Required for migration only. Greater than source; source must be 18 or later.                                                               |
-| `--user ROLE`                 | Required. Existing PostgreSQL superuser.                                                                                                    |
-| `--database DB`               | Existing database for authentication smoke test (default `postgres`). Simple names only.                                                    |
-| `--password-file PATH`        | Optional private password file (no group/other permissions). Otherwise hidden interactive prompt.                                           |
-| `--output-parent PATH`        | Optional existing directory outside db, on the same Linux mount/filesystem. Default: parent of db.                                          |
-| `--allow-parent-mounts`       | Optional. Allow running containers mounting strict ancestors of the database root, except `/`. Direct and descendant mounts remain blocked. |
-| `--backup-only`               | Dump without a target version or migration.                                                                                                 |
-| `--encrypt-backup`            | Encrypt the SQL dump with age.                                                                                                              |
-| `--identity-file PATH`        | Private age identity; required for encrypted restore.                                                                                       |
-| `--encryption-key-file PATH`  | Public age recipient list.                                                                                                                  |
-| `--encryption-recipient KEY`  | Public age recipient instead of recipient file.                                                                                             |
-| `--work-dir PATH`             | Alias for `--output-parent`.                                                                                                                |
-| `--require-encrypted-storage` | Require supported direct dm-crypt storage.                                                                                                  |
-| `--timeout SECONDS`           | Readiness/authentication timeout for each temporary server (default 300). Not a limit on dump/restore duration.                             |
+| Option                        | Meaning                                                                                                                                      |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--source PATH`               | Required. Root of the original bind mount, not the `18` or `docker` subdirectory.                                                            |
+| `--source-major N`            | Explicit source major, required when multiple versions remain; otherwise auto-detected.                                                      |
+| `--target-major N`            | Required for migration only. Greater than source; source must be 18 or later.                                                                |
+| `--user ROLE`                 | Required. Existing PostgreSQL superuser.                                                                                                     |
+| `--database DB`               | Existing database for authentication smoke test (default `postgres`). Simple names only.                                                     |
+| `--password-file PATH`        | Optional private password file (no group/other permissions). Otherwise hidden interactive prompt.                                            |
+| `--output-parent PATH`        | Optional existing directory outside db on the same Linux mount. For upgrades, a shared non-root ancestor is required. Default: parent of db. |
+| `--allow-parent-mounts`       | Optional. Allow running containers mounting strict ancestors of the database root, except `/`. Direct and descendant mounts remain blocked.  |
+| `--backup-only`               | Dump without a target version or migration.                                                                                                  |
+| `--encrypt-backup`            | Encrypt the SQL dump with age.                                                                                                               |
+| `--identity-file PATH`        | Private age identity; required for encrypted restore.                                                                                        |
+| `--encryption-key-file PATH`  | Public age recipient list.                                                                                                                   |
+| `--encryption-recipient KEY`  | Public age recipient instead of recipient file.                                                                                              |
+| `--work-dir PATH`             | Alias for `--output-parent`.                                                                                                                 |
+| `--require-encrypted-storage` | Require supported direct dm-crypt storage.                                                                                                   |
+| `--timeout SECONDS`           | Readiness/authentication timeout for each temporary server (default 300). Not a limit on dump/restore duration.                              |
 
 Optional environment settings: `MIGRATION_TZ=Europe/Berlin`, `MIGRATION_SHM_SIZE=256m`. The tool does not install anything in the application or alter its Compose file. The temporary Compose file is invoked automatically, so do not run `docker compose up` directly in the migration project.
 
@@ -104,9 +104,18 @@ The 19→20 example assumes the relevant official images have been published and
 
 The PostgreSQL data directory may have a different numeric UID/GID from the host account running the tool. Restrictive PostgreSQL directory permissions are supported without modifying the source ownership or access modes. Run the launcher as a non-root user with local Docker access.
 
-A short-lived, network-disabled filesystem helper inspects the original with a recursively read-only bind mount. The independent physical copy is normalized to the host UID/GID, and the isolated PostgreSQL servers run as that non-root user. Before publication the verified target PGDATA is assigned the original numeric UID/GID and `700` or `750` directory mode. The enclosing new major directory remains host-owned to allow an atomic rename; its mode allows the original database user to traverse it. Credentials, backups and logs remain private to the host user.
+A short-lived, network-disabled filesystem helper inspects the original with a recursively read-only bind mount. The independent physical copy is normalized to the host UID/GID, and the isolated PostgreSQL servers run as that non-root user. Before publication, the verified target major directory and its `docker` (PGDATA) directory are each assigned the numeric UID/GID and permission mode of the corresponding source directory. PGDATA retains its supported `700` or `750` mode; individual database file modes are generated by PostgreSQL, not copied from the original files. The publication helper performs a same-filesystem, no-overwrite rename and verifies both directory levels again after publication. Credentials, backups and logs remain private to the host user.
 
-The host needs access to the database root and write access to the workspace and lock parent, and to the database root for migrations. It does not need to read the protected PGDATA. Source nested mounts, symlinks and special files are unsupported. Filesystem helpers use `alpine:latest`; the physical copy uses the official source PostgreSQL image. Docker Engine must support `bind-recursive=readonly` (Linux kernel 5.12+).
+For example, the following layout is preserved across major versions:
+
+| Directory                                             | Numeric UID:GID | Mode  |
+| ----------------------------------------------------- | --------------- | ----- |
+| `<source-major>/` and `<target-major>/`               | `0:0`           | `755` |
+| `<source-major>/docker/` and `<target-major>/docker/` | `999:999`       | `700` |
+
+No manual ownership changes are required. The source directory is never changed.
+
+The host needs access to the database root and write access to the workspace and lock parent, and to the database root for migrations. For upgrades, the workspace and database root must share a common directory other than `/` on the same mount (normally the default workspace parent satisfies this requirement). The network-disabled publication helper mounts that common ancestor, overlays the selected original version recursively read-only, and performs only the verified rename. The target image must provide GNU `mv` with `--no-copy` support; the tool checks this before copying data. The host user does not need to read the protected PGDATA. Source nested mounts, symlinks and special files are unsupported. Filesystem helpers use `alpine:latest`; the physical copy uses the official source PostgreSQL image. Docker Engine must support `bind-recursive=readonly` (Linux kernel 5.12+).
 
 ## Migration safeguards
 
@@ -151,7 +160,7 @@ References: [official PostgreSQL Docker image](https://hub.docker.com/_/postgres
 
 GitHub Actions runs on pushes to `main`, pull requests targeting `main`, manual dispatch and on the first day of each month at 04:00 UTC. It detects the latest stable PostgreSQL major from `postgres:latest` and tests migration from the immediately preceding major. Missing required images, an unsupported source major (below 18), and migration failures fail CI.
 
-The matrix runs eight integration jobs covering plain and age-encrypted migrations across matching and independent database UID/GID configurations. The tests check source bytes, ownership and permission modes, target PGDATA ownership, backup-only operation, credentials, data, encryption, roles, grants, rollback and overwrite refusal. No production data is used. Dependabot checks GitHub Actions dependencies monthly.
+The matrix runs eight integration jobs covering plain and age-encrypted migrations across matching and independent database UID/GID configurations. The tests check source bytes, ownership and permission modes, target major-directory and PGDATA ownership and modes, backup-only operation, credentials, data, encryption, roles, grants, rollback and overwrite refusal. No production data is used. Dependabot checks GitHub Actions dependencies monthly.
 
 Run locally on a compatible Docker host as a non-root user:
 

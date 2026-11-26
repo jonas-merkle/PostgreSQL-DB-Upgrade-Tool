@@ -11,8 +11,15 @@ root=$(mktemp -d); name="pg-upgrade-ci-$$"; uid=$(id -u); gid=$(id -g)
 parent_name="$name-parent"; direct_name="$name-direct"
 db_uid=$uid; db_gid=$gid
 if [[ $ownership != host ]]; then db_uid=${ownership%:*}; db_gid=${ownership#*:}; fi
+# Exercise independent outer-directory ownership and traversal modes.
+parent_uid=0; parent_gid=0; parent_mode=755
+case "$ownership" in
+  host) parent_uid=$uid; parent_gid=$gid; parent_mode=700 ;;
+  999:999) parent_gid=$db_gid; parent_mode=2750 ;;
+  1000:1000) parent_mode=711 ;;
+esac
 # Fixture helpers deliberately access the protected cluster via Docker, not sudo.
-FIXTURE=(docker run --rm --network none --user 0:0 --cap-drop ALL --cap-add DAC_OVERRIDE --cap-add CHOWN --cap-add FOWNER --security-opt no-new-privileges --read-only)
+FIXTURE=(docker run --rm --network none --user 0:0 --cap-drop ALL --cap-add DAC_OVERRIDE --cap-add CHOWN --cap-add FOWNER --cap-add FSETID --security-opt no-new-privileges --read-only)
 fixture() { "${FIXTURE[@]}" --mount "type=bind,source=$root/db,target=/db" --entrypoint bash "postgres:$source_major" -euo pipefail -c "$@"; }
 fixture_ro() { "${FIXTURE[@]}" --mount "type=bind,source=$root/db,target=/db,readonly,bind-recursive=readonly,bind-propagation=rprivate" --entrypoint bash "postgres:$source_major" -euo pipefail -c "$@"; }
 cleanup() { rc=$?; trap - EXIT; docker rm -f "$parent_name" "$direct_name" >/dev/null 2>&1 || true; docker logs "$name" >&2 2>/dev/null || true; docker rm -f "$name" >/dev/null 2>&1 || true; if ((rc)); then echo "Test failed; diagnostics in $root" >&2; find "$root" -path "$root/db" -prune -o \( -name 'restore.log' -o -name 'readiness.log' \) -print | while read -r f; do tail -n 40 "$f"; done; else fixture 'rm -rf /db/*' && rm -rf "$root" || rc=1; fi; exit "$rc"; }
@@ -21,7 +28,7 @@ mkdir -m 755 "$root/db"; printf '%s' 'ci-test-password-123' > "$root/password"
 start() {
   # For a fresh fixture, emulate the official root entrypoint's directory setup.
   if [[ ! -e $root/db/$1 ]]; then
-    fixture 'mkdir -p "/db/$1/docker"; chown "$2:$3" "/db/$1/docker"; chmod 755 "/db/$1"; chmod 700 "/db/$1/docker"' sh "$1" "$db_uid" "$db_gid"
+    fixture 'mkdir -p "/db/$1/docker"; chown "$2:$3" "/db/$1/docker"; chmod 700 "/db/$1/docker"; chown "$4:$5" "/db/$1"; chmod "$6" "/db/$1"' sh "$1" "$db_uid" "$db_gid" "$parent_uid" "$parent_gid" "$parent_mode"
   fi
   docker run -d --name "$name" --network none --user "$db_uid:$db_gid" \
     --mount "type=bind,source=$root/db,target=/var/lib/postgresql" \
@@ -59,7 +66,7 @@ ciphertext=$(sql appdb -Atc "SELECT encode(ciphertext,'hex') FROM encrypted_samp
 stop
 # Simulate a vendor/custom preload requirement on the stopped fixture.
 # The tool must refuse to bypass it and must not modify even this source.
-# Confirm the fixture actually reproduces the reported permission mismatch.
+# Confirm independent database ownership restricts direct host access.
 if [[ $db_uid != "$uid" ]]; then
   test ! -r "$root/db/$source_major/docker/PG_VERSION"
 fi
@@ -73,6 +80,11 @@ fingerprint | diff - "$root/preload.sha"
 test ! -e "$root/db/$target_major"
 "${FIXTURE[@]}" -i --mount "type=bind,source=$root/db,target=/db" --entrypoint sh "postgres:$source_major" -eu -c 'cat > "/db/$1/docker/postgresql.conf"' sh "$source_major" < "$root/original-postgresql.conf"
 fingerprint > "$root/original.sha"
+# Record the actual source metadata; both target directory levels must match.
+source_parent_meta=$(fixture_ro 'stat -c "%u:%g:%a" "/db/$1"' sh "$source_major")
+source_data_meta=$(fixture_ro 'stat -c "%u:%g:%a" "/db/$1/docker"' sh "$source_major")
+test "$source_parent_meta" = "$parent_uid:$parent_gid:$parent_mode"
+test "$source_data_meta" = "$db_uid:$db_gid:700"
 args=(--source "$root/db" --source-major "$source_major" --target-major "$target_major" --user pgadmin --database appdb --timeout 120)
 # An inert management-style container holds a broad writable parent mount.
 docker run -d --name "$parent_name" --network none --cap-drop ALL --security-opt no-new-privileges --read-only \
@@ -128,7 +140,11 @@ else
 fi
 fingerprint | diff - "$root/original.sha"
 test "$(fixture_ro 'cat "/db/$1/docker/PG_VERSION"' sh "$target_major")" = "$target_major"
-test "$(fixture_ro 'stat -c "%u:%g:%a" "/db/$1/docker"' sh "$target_major")" = "$db_uid:$db_gid:700"
+assert_target_metadata() {
+  test "$(fixture_ro 'stat -c "%u:%g:%a" "/db/$1"' sh "$target_major")" = "$source_parent_meta"
+  test "$(fixture_ro 'stat -c "%u:%g:%a" "/db/$1/docker"' sh "$target_major")" = "$source_data_meta"
+}
+assert_target_metadata
 if [[ $db_uid != "$uid" ]]; then test ! -r "$root/db/$target_major/docker/PG_VERSION"; fi
 if bash "$repo/migrate.sh" "${args[@]}" --password-file "$root/password"; then echo 'Existing target unexpectedly overwritten' >&2; exit 1; fi
 docker rm -f "$parent_name" >/dev/null
@@ -140,6 +156,7 @@ test "$(sql extra -Atc 'SELECT answer FROM extra_data')" = 42
 test "$(docker exec -e PGPASSWORD=ci-app-password "$name" psql -X -w -h 127.0.0.1 -U appuser -d appdb -Atc 'SELECT count(*) FROM sample')" = 3
 test "$(sql appdb -Atc "INSERT INTO sample(value) VALUES ('new') RETURNING id" | head -n1)" = 4
 stop
+assert_target_metadata
 # Start the old image while both directories exist; confirm target writes did not leak.
 start "$source_major"
 test "$(sql appdb -Atc 'SELECT count(*) FROM sample')" = 3

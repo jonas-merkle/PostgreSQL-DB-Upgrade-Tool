@@ -15,7 +15,7 @@ Usage: ./migrate.sh --source /absolute/path/to/data/db --source-major 18 --targe
                     [--require-encrypted-storage] [--allow-parent-mounts] [--backup-only]
 
 Run as a non-root host user with local Docker access and writable publication parent.
-Database ownership is detected automatically and preserved on the published target.
+Numeric ownership and directory modes are preserved on both published directory levels.
 Backup-only requires no target version or target image.
 Supports stock PostgreSQL and pgcrypto column encryption; vendor TDE is not supported.
 Stop the original PostgreSQL and all writers before running. No automatic cutover.
@@ -24,7 +24,8 @@ A successful run publishes <target-major>/docker beside the untouched source.
 Logs and SQL backup remain in a private sibling run directory.
 If several source versions exist, --source-major is mandatory.
 Only official Debian PostgreSQL major-version images, version 18 or newer, are supported.
---work-dir aliases --output-parent (same mount as database root).
+--work-dir aliases --output-parent (same mount as database root; upgrades also
+ require a shared non-root directory ancestor).
 Encrypted migration requires an age identity file; backup-only may use a public recipient alone.
 --require-encrypted-storage checks for a directly mounted dm-crypt device (not ZFS).
 --allow-parent-mounts permits strict ancestor mounts (except /); direct and
@@ -71,7 +72,7 @@ if ((ENCRYPT)); then
 else
   [[ -z $IDENTITY_FILE && -z $RECIPIENT_FILE && -z $RECIPIENT ]] || fail 'Encryption options require --encrypt-backup.'
 fi
-for cmd in docker realpath stat find mktemp od tr diff sha256sum grep flock mv tee sync cut findmnt; do command -v "$cmd" >/dev/null || fail "Missing command: $cmd"; done
+for cmd in docker realpath stat find mktemp od tr diff sha256sum grep flock tee sync cut findmnt; do command -v "$cmd" >/dev/null || fail "Missing command: $cmd"; done
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 SOURCE_PATH=$(realpath -e -- "$SOURCE_PATH")
 [[ -d $SOURCE_PATH && $SOURCE_PATH != / ]] || fail 'Invalid source directory.'
@@ -129,7 +130,7 @@ metadata=$(source_probe "$SOURCE_MAJOR") || fail 'Read-only source inspection fa
 read -r SOURCE_MAJOR DATA_UID DATA_GID DATA_MODE PARENT_UID PARENT_GID PARENT_MODE extra <<< "$metadata"
 [[ -z $extra && $SOURCE_MAJOR =~ ^[1-9][0-9]{1,2}$ && $SOURCE_MAJOR -ge 18 ]] || fail 'Require source >= 18.'
 for n in "$DATA_UID" "$DATA_GID" "$PARENT_UID" "$PARENT_GID"; do [[ $n =~ ^[0-9]+$ ]] || fail 'Invalid ownership metadata.'; done
-[[ $DATA_UID != 0 && $DATA_MODE =~ ^(700|750)$ && $PARENT_MODE =~ ^[0-7]{3,4}$ ]] || fail 'Unsupported PGDATA owner or mode (require non-root owner and 700/750).'
+[[ $DATA_UID != 0 && $DATA_MODE =~ ^(700|750)$ && $PARENT_MODE =~ ^[0-7]{1,4}$ ]] || fail 'Unsupported PGDATA owner or mode (require non-root owner and 700/750).'
 if ((BACKUP_ONLY)); then TARGET_MAJOR=$SOURCE_MAJOR; else
   [[ $TARGET_MAJOR =~ ^[1-9][0-9]{1,2}$ && $TARGET_MAJOR -gt $SOURCE_MAJOR ]] || fail 'Require target > source.'
 fi
@@ -146,6 +147,18 @@ OUTPUT_PARENT=$(realpath -e -- "$OUTPUT_PARENT")
 output_mount=$(findmnt -n -o ID -T "$OUTPUT_PARENT") || fail 'Cannot determine workspace mount.'
 source_mount=$(findmnt -n -o ID -T "$SOURCE_PATH") || fail 'Cannot determine database root mount.'
 [[ -n $output_mount && $output_mount == "$source_mount" ]] || fail 'Output and database root must be on the same Linux mount for atomic publication.'
+# Publication must rename within one mount even when the staged directory is
+# owned by a different UID. Bind a common non-root ancestor into the isolated
+# publication helper rather than binding the two rename parents separately.
+if ((!BACKUP_ONLY)); then
+  PUBLISH_ROOT=$OUTPUT_PARENT
+  while [[ $SOURCE_PATH != "$PUBLISH_ROOT" && $SOURCE_PATH != "$PUBLISH_ROOT/"* && $PUBLISH_ROOT != / ]]; do
+    PUBLISH_ROOT=$(dirname -- "$PUBLISH_ROOT")
+  done
+  [[ $PUBLISH_ROOT != / ]] || fail 'Choose a workspace sharing a non-root ancestor with the database root (for example its parent).'
+  publish_mount=$(findmnt -n -o ID -T "$PUBLISH_ROOT") || fail 'Cannot determine publication mount.'
+  [[ $publish_mount == "$source_mount" ]] || fail 'Workspace and database root must share a common ancestor on the same mount for publication.'
+fi
 if ((REQUIRE_ENCRYPTED)); then
   command -v lsblk >/dev/null || fail 'lsblk required for encrypted storage verification.'
   for path in "$SOURCE_PATH" "$OUTPUT_PARENT"; do
@@ -155,8 +168,6 @@ if ((REQUIRE_ENCRYPTED)); then
   done
   log 'Verified direct dm-crypt mount for source and migration output (not a guarantee about swap or Docker logs).'
 fi
-MV_OPTS=(-T -n)
-if mv --help | grep -q -- '--no-copy'; then MV_OPTS+=(--no-copy); fi
 check_offline() {
   local ids id mounts m canonical
   ids=$(docker ps -q) || fail 'Cannot enumerate Docker containers.'
@@ -180,7 +191,7 @@ check_offline() {
   current=$(source_probe "$SOURCE_MAJOR") || fail 'Source is not offline or no longer valid.'
   [[ $current == "$metadata" ]] || fail 'Source ownership, permissions or version changed unexpectedly.'
 }
-log "Preflight: PostgreSQL $SOURCE_MAJOR; source root $SOURCE_PATH; host UID/GID $RUN_UID:$RUN_GID; original PGDATA UID/GID $DATA_UID:$DATA_GID"
+log "Preflight: PostgreSQL $SOURCE_MAJOR; source root $SOURCE_PATH; host UID/GID $RUN_UID:$RUN_GID; original major directory $PARENT_UID:$PARENT_GID ($PARENT_MODE); PGDATA $DATA_UID:$DATA_GID ($DATA_MODE)"
 if ((BACKUP_ONLY)); then log 'Mode: backup only (no target database)'; else log "Mode: upgrade to PostgreSQL $TARGET_MAJOR"; fi
 if ((ALLOW_PARENT_MOUNTS)); then log 'WARNING: parent-mount override enabled; keep all writers and automated redeployment disabled throughout the operation.'; fi
 log 'Checking for running containers with overlapping mounts and PostgreSQL PID file'
@@ -263,6 +274,11 @@ for major in "${majors[@]}"; do
   expected="PGDATA=/var/lib/postgresql/$major/docker"
   docker image inspect "postgres:$major" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "$expected" >/dev/null || fail "postgres:$major does not advertise expected data layout."
 done
+if ((!BACKUP_ONLY)); then
+  # Confirm rename-only publication is available before copying or restoring data.
+  mv_help=$("${HELPER[@]}" --entrypoint mv "postgres:$TARGET_MAJOR" --help) || fail 'Cannot inspect target image rename utility.'
+  [[ $mv_help == *--no-copy* ]] || fail 'Target image must provide GNU mv with --no-copy for atomic publication.'
+fi
 BACKUP_NAME=cluster.sql
 # The age helper has no network access and never writes a plaintext SQL file.
 if ((ENCRYPT)); then
@@ -444,42 +460,64 @@ grep -Eq '^Database cluster state:[[:space:]]+shut down$' "$RUN_DIR/target-contr
 log 'Checking offline status again before publishing'
 check_offline
 [[ ! -e $FINAL_DIR && ! -L $FINAL_DIR ]] || fail 'Target directory appeared during migration; refusing to overwrite.'
-# Restore production ownership on the verified staged target, not on the original.
-# Keep the enclosing major directory owned by the launcher so an unprivileged
-# same-filesystem rename can update its parent. Only PGDATA needs the database
-# identity. Permit traversal by the database UID without exposing PGDATA.
-TARGET_PARENT_MODE=700
-if [[ $DATA_UID != "$RUN_UID" ]]; then TARGET_PARENT_MODE=711; fi
-if [[ $PARENT_MODE == 755 ]]; then TARGET_PARENT_MODE=755; fi
-log "Preparing target PGDATA ownership $DATA_UID:$DATA_GID; major directory $RUN_UID:$RUN_GID mode $TARGET_PARENT_MODE"
-"${HELPER[@]}" --cap-add CHOWN --cap-add FOWNER \
+# Restore both directory levels on the verified staged target. Keep the
+# individual database file modes generated by PostgreSQL's initdb.
+log "Preparing target PGDATA $DATA_UID:$DATA_GID mode $DATA_MODE; major directory $PARENT_UID:$PARENT_GID mode $PARENT_MODE"
+"${HELPER[@]}" --cap-add CHOWN --cap-add FOWNER --cap-add FSETID \
   --mount "type=bind,source=$RUN_DIR/target/$TARGET_MAJOR,target=/staged" \
   --entrypoint sh alpine:latest -eu -c '
     chown -R "$1:$2" /staged/docker
-    chmod "$3" /staged/docker
+    chmod "00$3" /staged/docker
     # initdb was given --allow-group-access for a source mode of 750; do
     # not blanket-widen the generated individual file permissions.
     chown "$4:$5" /staged
-    chmod "$6" /staged
+    chmod "00$6" /staged
     [ "$(stat -c "%u:%g:%a" /staged/docker)" = "$1:$2:$3" ]
     [ "$(stat -c "%u:%g:%a" /staged)" = "$4:$5:$6" ]
-  ' sh "$DATA_UID" "$DATA_GID" "$DATA_MODE" "$RUN_UID" "$RUN_GID" "$TARGET_PARENT_MODE"
+  ' sh "$DATA_UID" "$DATA_GID" "$DATA_MODE" "$PARENT_UID" "$PARENT_GID" "$PARENT_MODE"
 (cd "$RUN_DIR" && sha256sum -c "$BACKUP_NAME.sha256")
 cat > "$RUN_DIR/READY.txt" <<REPORT
 Logical migration verified: PostgreSQL $SOURCE_MAJOR -> $TARGET_MAJOR
 Original data: $SOURCE_PATH/$SOURCE_MAJOR (not modified)
 New directory: $FINAL_DIR
 Published PGDATA UID:GID and mode: $DATA_UID:$DATA_GID $DATA_MODE
-Published major directory UID:GID and mode: $RUN_UID:$RUN_GID $TARGET_PARENT_MODE
+Published major directory UID:GID and mode: $PARENT_UID:$PARENT_GID $PARENT_MODE
 SQL backup: $RUN_DIR/$BACKUP_NAME
 Temporary bootstrap role: $BOOTSTRAP_ROLE (NOLOGIN, password removed)
 Checks: dump/restore exit status, version, database and role inventory, original credentials, role password/validity and memberships, statistics, clean shutdown and ownership.
 REPORT
-# Commit point: same-filesystem atomic rename, no overwrite. GNU mv -n can
-# return success when skipping, so also check that staging actually moved.
+# Commit point: same-filesystem atomic rename with no overwrite or copy fallback.
+# Linux can require write permission on the moved directory itself when changing
+# its parent. Use the isolated helper rather than changing final metadata again.
+# A single bind mount preserves the rename domain; overlay the original version
+# recursively read-only. Other nested mounts are not exposed to this helper.
 log "Publishing $FINAL_DIR (leaving $SOURCE_PATH/$SOURCE_MAJOR untouched)"
 sync -f "$RUN_DIR/target"
-mv "${MV_OPTS[@]}" -- "$RUN_DIR/target/$TARGET_MAJOR" "$FINAL_DIR"
+check_offline
+staged_in_helper="/publish${RUN_DIR#"$PUBLISH_ROOT"}/target/$TARGET_MAJOR"
+final_in_helper="/publish${FINAL_DIR#"$PUBLISH_ROOT"}"
+original_in_helper="/publish${SOURCE_PATH#"$PUBLISH_ROOT"}/$SOURCE_MAJOR"
+"${HELPER[@]}" --cap-add FOWNER \
+  --mount "type=bind,source=$PUBLISH_ROOT,target=/publish,bind-recursive=disabled,bind-propagation=rprivate" \
+  --mount "type=bind,source=$SOURCE_PATH/$SOURCE_MAJOR,target=$original_in_helper,readonly,bind-recursive=readonly,bind-propagation=rprivate" \
+  --entrypoint sh "postgres:$TARGET_MAJOR" -eu -c '
+    staged=$1; final=$2
+    [ -d "$staged" ]
+    [ ! -L "$staged" ]
+    [ ! -e "$final" ]
+    [ ! -L "$final" ]
+    [ "$(stat -c "%u:%g:%a" "$staged")" = "$3" ]
+    [ "$(stat -c "%u:%g:%a" "$staged/docker")" = "$4" ]
+    [ "$(cat "$staged/docker/PG_VERSION")" = "$5" ]
+    # Fail closed if rename-only semantics are not supported.
+    mv --no-copy --no-clobber --no-target-directory -- "$staged" "$final"
+    [ ! -e "$staged" ]
+    [ ! -L "$staged" ]
+    [ "$(stat -c "%u:%g:%a" "$final")" = "$3" ]
+    [ "$(stat -c "%u:%g:%a" "$final/docker")" = "$4" ]
+    [ "$(cat "$final/docker/PG_VERSION")" = "$5" ]
+    sync -f "${final%/*}"
+  ' sh "$staged_in_helper" "$final_in_helper" "$PARENT_UID:$PARENT_GID:$PARENT_MODE" "$DATA_UID:$DATA_GID:$DATA_MODE" "$TARGET_MAJOR"
 [[ ! -e $RUN_DIR/target/$TARGET_MAJOR && -d $FINAL_DIR ]] || fail 'Publication was skipped; target may already exist.'
 published=1
 printf '\nSUCCESS: PostgreSQL %s -> %s\n' "$SOURCE_MAJOR" "$TARGET_MAJOR"

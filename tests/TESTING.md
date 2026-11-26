@@ -19,11 +19,11 @@ bash tests/integration.sh 18 19 plain 999:0
 bash tests/integration.sh 18 19 encrypted 999:0
 ```
 
-The optional fourth argument selects the fixture database UID/GID (`host` by default, or a numeric `UID:GID`). CI tests `host`, `999:999`, `999:0` and `1000:1000` in both modes. The fixture has a root-owned major directory (755) and a restrictive PostgreSQL data directory (700). When the database UID differs from the host, the tests assert that the host cannot read `PG_VERSION` directly.
+The optional fourth argument selects the fixture database UID/GID (`host` by default, or a numeric `UID:GID`). CI tests `host`, `999:999`, `999:0` and `1000:1000` in both modes. The fixtures exercise outer-directory ownership and modes independently of PGDATA: host-owned `700`, root-owned `755`, root-owned group-traversable `2750` (setgid), and root-owned `711`. PGDATA uses mode `700`. Both directory levels must match the source UID/GID and mode before and after the migrated cluster is restarted. When the database UID differs from the host, the tests assert that the host cannot read `PG_VERSION` directly.
 
 Use a Linux host (kernel 5.12+) with local rootful Docker supporting recursive read-only bind mounts, a non-root account with Docker access and published official PostgreSQL major-version images. The fixture is disposable. CI detects the latest stable major and the preceding major on pushes and pull requests to main, manual dispatch and monthly schedules. Missing required images fail the workflow.
 
-The integration suite checks original file fingerprints (bytes, ownership and modes), source-version auto-detection through restricted files, failed credentials, backup-only without a target, encrypted backup verification and wrong age identities, role/grant preservation, multiple databases, sequences, pgcrypto ciphertext/decryption, target PGDATA owner/mode, target startup under the original UID/GID, overwrite refusal and rollback. No production data or keys are required.
+The integration suite checks original file fingerprints (bytes, ownership and modes), source-version auto-detection through restricted files, failed credentials, backup-only without a target, encrypted backup verification and wrong age identities, role/grant preservation, multiple databases, sequences, pgcrypto ciphertext/decryption, target major-directory and PGDATA owner/mode, target startup under the original UID/GID, overwrite refusal and rollback. No production data or keys are required.
 
 The integration suite also checks default parent-mount rejection, opt-in acceptance of an inert parent-mounted container, and continued rejection of direct and descendant mounts with the override.
 
