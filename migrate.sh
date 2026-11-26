@@ -12,7 +12,7 @@ Usage: ./migrate.sh --source /absolute/path/to/data/db --source-major 18 --targe
                     [--output-parent /path] [--timeout 300] \
                     [--encrypt-backup --identity-file /secure/age-key.txt \
                      [--encryption-key-file /path/recipients.txt | --encryption-recipient age1...]] \
-                    [--require-encrypted-storage] [--backup-only]
+                    [--require-encrypted-storage] [--allow-parent-mounts] [--backup-only]
 
 Run as a non-root host user with local Docker access and writable publication parent.
 Database ownership is detected automatically and preserved on the published target.
@@ -27,19 +27,22 @@ Only official Debian PostgreSQL major-version images, version 18 or newer, are s
 --work-dir aliases --output-parent (same mount as database root).
 Encrypted migration requires an age identity file; backup-only may use a public recipient alone.
 --require-encrypted-storage checks for a directly mounted dm-crypt device (not ZFS).
+--allow-parent-mounts permits strict ancestor mounts (except /); direct and
+ descendant mounts remain blocked. Disable automatic redeployment and all writers.
 HELP
 }
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 log() { printf '\n[%s] ==> %s\n' "$(date -u +%FT%TZ)" "$*" >&2; }
 # Parse configuration without sourcing user-controlled shell files.
 SOURCE_PATH= SOURCE_MAJOR= TARGET_MAJOR= SOURCE_USER= SOURCE_DB=postgres PASSWORD_FILE= OUTPUT_PARENT= TIMEOUT=300
-ENCRYPT=0 REQUIRE_ENCRYPTED=0 BACKUP_ONLY=0 IDENTITY_FILE= RECIPIENT_FILE= RECIPIENT=
+ENCRYPT=0 REQUIRE_ENCRYPTED=0 ALLOW_PARENT_MOUNTS=0 BACKUP_ONLY=0 IDENTITY_FILE= RECIPIENT_FILE= RECIPIENT=
 while (($#)); do
   case "$1" in
     -h|--help) usage; exit 0;;
     --encrypt-backup) ENCRYPT=1; shift;;
     --require-encrypted-storage) REQUIRE_ENCRYPTED=1; shift;;
     --backup-only) BACKUP_ONLY=1; shift;;
+    --allow-parent-mounts) ALLOW_PARENT_MOUNTS=1; shift;;
     --source|--source-major|--target-major|--user|--database|--password-file|--output-parent|--work-dir|--timeout|--identity-file|--encryption-key-file|--encryption-recipient)
       (($# >= 2)) || fail "Missing value for $1"
       case "$1" in
@@ -161,9 +164,15 @@ check_offline() {
     mounts=$(docker inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$id") || fail 'Cannot inspect Docker mounts.'
     while IFS= read -r m; do
       [[ -n $m ]] || continue
-      canonical=$(realpath -m -- "$m")
-      if [[ $canonical == / || $canonical == "$SOURCE_PATH" || $canonical == "$SOURCE_PATH/"* || $SOURCE_PATH == "$canonical/"* ]]; then
-        fail "Running container $id mounts the source or an overlapping directory ($m). Stop it first."
+      canonical=$(realpath -m -- "$m") || fail "Cannot resolve container mount: $m"
+      if [[ $canonical == / || $canonical == "$SOURCE_PATH" || $canonical == "$SOURCE_PATH/"* ]]; then
+        fail "Running container $id mounts the database root, a descendant or the filesystem root ($m). Stop it first."
+      elif [[ $SOURCE_PATH == "$canonical/"* ]]; then
+        if ((ALLOW_PARENT_MOUNTS)); then
+          printf 'WARNING: allowing parent mount %s from running container %s. Ensure it cannot write to the source or redeploy PostgreSQL.\n' "$m" "$id" >&2
+        else
+          fail "Running container $id mounts a parent directory ($m). Stop it first, or explicitly use --allow-parent-mounts after disabling writers and automated redeployment."
+        fi
       fi
     done <<< "$mounts"
   done
@@ -173,6 +182,7 @@ check_offline() {
 }
 log "Preflight: PostgreSQL $SOURCE_MAJOR; source root $SOURCE_PATH; host UID/GID $RUN_UID:$RUN_GID; original PGDATA UID/GID $DATA_UID:$DATA_GID"
 if ((BACKUP_ONLY)); then log 'Mode: backup only (no target database)'; else log "Mode: upgrade to PostgreSQL $TARGET_MAJOR"; fi
+if ((ALLOW_PARENT_MOUNTS)); then log 'WARNING: parent-mount override enabled; keep all writers and automated redeployment disabled throughout the operation.'; fi
 log 'Checking for running containers with overlapping mounts and PostgreSQL PID file'
 check_offline
 # Never accept passwords as command arguments; file or hidden prompt only.
@@ -378,6 +388,7 @@ if ((BACKUP_ONLY)); then
   "${DC[@]}" logs --no-color > "$RUN_DIR/container.log" 2>&1
   "${DC[@]}" down --timeout 120 2>&1 | tee "$RUN_DIR/cleanup.log"
   started=0
+  check_offline
   printf 'Backup verified: %s\nSource retained: %s\n' "$RUN_DIR/$BACKUP_NAME" "$SOURCE_DATA" > "$RUN_DIR/BACKUP.txt"
   printf 'BACKUP COMPLETE: %s\nNo target published. Keep the original image tag and restart the original application when ready.\n' "$RUN_DIR/$BACKUP_NAME"
   if ((ENCRYPT)); then log 'Retain the private decryption identity separately; test recovery before relying on the backup.'; fi

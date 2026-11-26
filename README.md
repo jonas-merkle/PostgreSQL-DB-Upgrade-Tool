@@ -68,23 +68,24 @@ Temporary copies and credentials are removed during normal cleanup. Failed migra
 
 ## CLI options
 
-| Option                        | Meaning                                                                                                         |
-| ----------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `--source PATH`               | Required. Root of the original bind mount, not the `18` or `docker` subdirectory.                               |
-| `--source-major N`            | Explicit source major, required when multiple versions remain; otherwise auto-detected.                         |
-| `--target-major N`            | Required for migration only. Greater than source; source must be 18 or later.                                   |
-| `--user ROLE`                 | Required. Existing PostgreSQL superuser.                                                                        |
-| `--database DB`               | Existing database for authentication smoke test (default `postgres`). Simple names only.                        |
-| `--password-file PATH`        | Optional private password file (no group/other permissions). Otherwise hidden interactive prompt.               |
-| `--output-parent PATH`        | Optional existing directory outside db, on the same Linux mount/filesystem. Default: parent of db.              |
-| `--backup-only`               | Dump without a target version or migration.                                                                     |
-| `--encrypt-backup`            | Encrypt the SQL dump with age.                                                                                  |
-| `--identity-file PATH`        | Private age identity; required for encrypted restore.                                                           |
-| `--encryption-key-file PATH`  | Public age recipient list.                                                                                      |
-| `--encryption-recipient KEY`  | Public age recipient instead of recipient file.                                                                 |
-| `--work-dir PATH`             | Alias for `--output-parent`.                                                                                    |
-| `--require-encrypted-storage` | Require supported direct dm-crypt storage.                                                                      |
-| `--timeout SECONDS`           | Readiness/authentication timeout for each temporary server (default 300). Not a limit on dump/restore duration. |
+| Option                        | Meaning                                                                                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--source PATH`               | Required. Root of the original bind mount, not the `18` or `docker` subdirectory.                                                           |
+| `--source-major N`            | Explicit source major, required when multiple versions remain; otherwise auto-detected.                                                     |
+| `--target-major N`            | Required for migration only. Greater than source; source must be 18 or later.                                                               |
+| `--user ROLE`                 | Required. Existing PostgreSQL superuser.                                                                                                    |
+| `--database DB`               | Existing database for authentication smoke test (default `postgres`). Simple names only.                                                    |
+| `--password-file PATH`        | Optional private password file (no group/other permissions). Otherwise hidden interactive prompt.                                           |
+| `--output-parent PATH`        | Optional existing directory outside db, on the same Linux mount/filesystem. Default: parent of db.                                          |
+| `--allow-parent-mounts`       | Optional. Allow running containers mounting strict ancestors of the database root, except `/`. Direct and descendant mounts remain blocked. |
+| `--backup-only`               | Dump without a target version or migration.                                                                                                 |
+| `--encrypt-backup`            | Encrypt the SQL dump with age.                                                                                                              |
+| `--identity-file PATH`        | Private age identity; required for encrypted restore.                                                                                       |
+| `--encryption-key-file PATH`  | Public age recipient list.                                                                                                                  |
+| `--encryption-recipient KEY`  | Public age recipient instead of recipient file.                                                                                             |
+| `--work-dir PATH`             | Alias for `--output-parent`.                                                                                                                |
+| `--require-encrypted-storage` | Require supported direct dm-crypt storage.                                                                                                  |
+| `--timeout SECONDS`           | Readiness/authentication timeout for each temporary server (default 300). Not a limit on dump/restore duration.                             |
 
 Optional environment settings: `MIGRATION_TZ=Europe/Berlin`, `MIGRATION_SHM_SIZE=256m`. The tool does not install anything in the application or alter its Compose file. The temporary Compose file is invoked automatically, so do not run `docker compose up` directly in the migration project.
 
@@ -110,6 +111,14 @@ The host needs access to the database root and write access to the workspace and
 ## Migration safeguards
 
 The tool detects source ownership through an isolated filesystem helper, checks offline status, image layout, storage and destination conflicts. It mounts the original recursively read-only, copies it independently and starts isolated temporary servers. A strict logical dump and restore preserves dumpable databases, roles, grants and password hashes. It checks credentials, database and role inventories, memberships, extensions and clean shutdown, then publishes the new directory with a same-filesystem rename. The old directory is never renamed or deleted. A disabled bootstrap role may remain in the restored cluster.
+
+### Parent directory mounts
+
+By default, the tool rejects running containers with mounts overlapping the database root. Management containers may mount a broader directory containing multiple application stacks. If stopping such containers is impractical, explicitly add `--allow-parent-mounts` to a migration or backup command. The command generator exposes the same optional setting.
+
+The override allows strict ancestor mounts (other than `/`) and logs warnings identifying the container and mount. Mounts of the database root itself, its descendants or `/` still cause an error, regardless of whether they are writable. Unrelated paths are unaffected. Offline, PID-file and clean-shutdown checks remain in force.
+
+**Only enable this option if you trust every allowed container and have disabled all writers and automated redeployment.** A parent mount can expose both database files and the migration workspace, and Docker API access can permit restarting the source. The tool cannot enforce exclusive access against other processes or Docker administrators. Keep the source offline throughout the operation.
 
 ## Backup and operational logs
 

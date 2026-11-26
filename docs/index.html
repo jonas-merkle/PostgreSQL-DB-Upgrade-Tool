@@ -121,8 +121,16 @@
               max="99999"
               step="1"
               value="300"
-              required
-          /></label>
+              required /></label
+          ><label class="check"
+            ><input id="allowParentMounts" type="checkbox" />Allow running containers with parent
+            directory mounts</label
+          >
+          <p class="note">
+            Advanced opt-in: disable automated redeployment and ensure these containers cannot write
+            to the database or migration workspace. Direct database mounts and filesystem-root
+            mounts remain blocked.
+          </p>
         </fieldset>
         <button type="submit">Generate command</button>
       </form>

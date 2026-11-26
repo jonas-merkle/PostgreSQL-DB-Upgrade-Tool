@@ -8,13 +8,14 @@ ownership=${4:-host}
 [[ $ownership == host || $ownership =~ ^[1-9][0-9]*:[0-9]+$ ]] || exit 2
 repo=$(cd "$(dirname "$0")/.." && pwd)
 root=$(mktemp -d); name="pg-upgrade-ci-$$"; uid=$(id -u); gid=$(id -g)
+parent_name="$name-parent"; direct_name="$name-direct"
 db_uid=$uid; db_gid=$gid
 if [[ $ownership != host ]]; then db_uid=${ownership%:*}; db_gid=${ownership#*:}; fi
 # Fixture helpers deliberately access the protected cluster via Docker, not sudo.
 FIXTURE=(docker run --rm --network none --user 0:0 --cap-drop ALL --cap-add DAC_OVERRIDE --cap-add CHOWN --cap-add FOWNER --security-opt no-new-privileges --read-only)
 fixture() { "${FIXTURE[@]}" --mount "type=bind,source=$root/db,target=/db" --entrypoint bash "postgres:$source_major" -euo pipefail -c "$@"; }
 fixture_ro() { "${FIXTURE[@]}" --mount "type=bind,source=$root/db,target=/db,readonly,bind-recursive=readonly,bind-propagation=rprivate" --entrypoint bash "postgres:$source_major" -euo pipefail -c "$@"; }
-cleanup() { rc=$?; trap - EXIT; docker logs "$name" >&2 2>/dev/null || true; docker rm -f "$name" >/dev/null 2>&1 || true; if ((rc)); then echo "Test failed; diagnostics in $root" >&2; find "$root" -path "$root/db" -prune -o \( -name 'restore.log' -o -name 'readiness.log' \) -print | while read -r f; do tail -n 40 "$f"; done; else fixture 'rm -rf /db/*' && rm -rf "$root" || rc=1; fi; exit "$rc"; }
+cleanup() { rc=$?; trap - EXIT; docker rm -f "$parent_name" "$direct_name" >/dev/null 2>&1 || true; docker logs "$name" >&2 2>/dev/null || true; docker rm -f "$name" >/dev/null 2>&1 || true; if ((rc)); then echo "Test failed; diagnostics in $root" >&2; find "$root" -path "$root/db" -prune -o \( -name 'restore.log' -o -name 'readiness.log' \) -print | while read -r f; do tail -n 40 "$f"; done; else fixture 'rm -rf /db/*' && rm -rf "$root" || rc=1; fi; exit "$rc"; }
 trap cleanup EXIT
 mkdir -m 755 "$root/db"; printf '%s' 'ci-test-password-123' > "$root/password"
 start() {
@@ -73,6 +74,26 @@ test ! -e "$root/db/$target_major"
 "${FIXTURE[@]}" -i --mount "type=bind,source=$root/db,target=/db" --entrypoint sh "postgres:$source_major" -eu -c 'cat > "/db/$1/docker/postgresql.conf"' sh "$source_major" < "$root/original-postgresql.conf"
 fingerprint > "$root/original.sha"
 args=(--source "$root/db" --source-major "$source_major" --target-major "$target_major" --user pgadmin --database appdb --timeout 120)
+# An inert management-style container holds a broad writable parent mount.
+docker run -d --name "$parent_name" --network none --cap-drop ALL --security-opt no-new-privileges --read-only \
+  --mount "type=bind,source=$root,target=/managed" alpine:latest sleep 3600 >/dev/null
+if bash "$repo/migrate.sh" "${args[@]}" --password-file "$root/password" > "$root/parent-block.log" 2>&1; then
+  echo 'Parent mount unexpectedly accepted by default' >&2; exit 1
+fi
+grep -F 'mounts a parent directory' "$root/parent-block.log"
+for blocked_path in "$root/db" "$root/db/$source_major/docker"; do
+  docker run -d --name "$direct_name" --network none --cap-drop ALL --security-opt no-new-privileges --read-only \
+    --mount "type=bind,source=$blocked_path,target=/blocked,readonly" alpine:latest sleep 3600 >/dev/null
+  if bash "$repo/migrate.sh" "${args[@]}" --allow-parent-mounts --password-file "$root/password" > "$root/direct-block.log" 2>&1; then
+    echo 'Direct or descendant mount unexpectedly accepted' >&2; exit 1
+  fi
+  grep -F 'mounts the database root, a descendant or the filesystem root' "$root/direct-block.log"
+  docker rm -f "$direct_name" >/dev/null
+done
+fingerprint | diff - "$root/original.sha"
+test ! -e "$root/db/$target_major"
+# Keep the parent container running through the normal backup and upgrade tests.
+args+=(--allow-parent-mounts)
 printf '%s' wrong-password > "$root/wrong"
 if bash "$repo/migrate.sh" "${args[@]}" --password-file "$root/wrong" --timeout 8; then echo 'Wrong password unexpectedly succeeded' >&2; exit 1; fi
 test ! -e "$root/db/$target_major"
@@ -86,7 +107,7 @@ if [[ $mode == encrypted ]]; then
   if bash "$repo/migrate.sh" "${args[@]}" --password-file "$root/password" --encrypt-backup --identity-file "$root/wrong-identity" --encryption-key-file "$root/recipients"; then echo 'Mismatched identity unexpectedly succeeded' >&2; exit 1; fi
   test ! -e "$root/db/$target_major"
   fingerprint | diff - "$root/original.sha"
-  bash "$repo/migrate.sh" --source "$root/db" --user pgadmin --database appdb --password-file "$root/password" --encrypt-backup --encryption-recipient "$recipient" --backup-only
+  bash "$repo/migrate.sh" --source "$root/db" --user pgadmin --database appdb --allow-parent-mounts --password-file "$root/password" --encrypt-backup --encryption-recipient "$recipient" --backup-only
   test ! -e "$root/db/$target_major"
   fingerprint | diff - "$root/original.sha"
   bash "$repo/migrate.sh" "${args[@]}" --password-file "$root/password" --encrypt-backup --identity-file "$root/identity" --encryption-key-file "$root/recipients"
@@ -100,7 +121,7 @@ if [[ $mode == encrypted ]]; then
   done < <(find "$root" -path "$root/db" -prune -o -name cluster.sql.age -print0)
   test "$count" = 2
 else
-  bash "$repo/migrate.sh" --source "$root/db" --user pgadmin --database appdb --password-file "$root/password" --backup-only
+  bash "$repo/migrate.sh" --source "$root/db" --user pgadmin --database appdb --allow-parent-mounts --password-file "$root/password" --backup-only
   test ! -e "$root/db/$target_major"
   fingerprint | diff - "$root/original.sha"
   bash "$repo/migrate.sh" "${args[@]}" --password-file "$root/password"
@@ -110,6 +131,7 @@ test "$(fixture_ro 'cat "/db/$1/docker/PG_VERSION"' sh "$target_major")" = "$tar
 test "$(fixture_ro 'stat -c "%u:%g:%a" "/db/$1/docker"' sh "$target_major")" = "$db_uid:$db_gid:700"
 if [[ $db_uid != "$uid" ]]; then test ! -r "$root/db/$target_major/docker/PG_VERSION"; fi
 if bash "$repo/migrate.sh" "${args[@]}" --password-file "$root/password"; then echo 'Existing target unexpectedly overwritten' >&2; exit 1; fi
+docker rm -f "$parent_name" >/dev/null
 start "$target_major"
 test "$(sql appdb -Atc "SELECT encode(ciphertext,'hex') FROM encrypted_sample")" = "$ciphertext"
 test "$(sql appdb -Atc "SELECT pgp_sym_decrypt(ciphertext,'fixture-key') FROM encrypted_sample")" = 'private test value'

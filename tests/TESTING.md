@@ -8,7 +8,7 @@ bash -n tests/integration.sh
 node tests/generator.test.js
 ```
 
-The JavaScript tests exercise version validation, backup-only mode, age option validation and shell-safe quoting with adversarial paths. They do not execute the migration script.
+The JavaScript tests exercise version validation, backup-only mode, age option validation, parent-mount opt-in and shell-safe quoting with adversarial paths. They do not execute the migration script.
 
 ## Docker integration tests
 
@@ -24,6 +24,8 @@ The optional fourth argument selects the fixture database UID/GID (`host` by def
 Use a Linux host (kernel 5.12+) with local rootful Docker supporting recursive read-only bind mounts, a non-root account with Docker access and published official PostgreSQL major-version images. The fixture is disposable. CI detects the latest stable major and the preceding major on pushes and pull requests to main, manual dispatch and monthly schedules. Missing required images fail the workflow.
 
 The integration suite checks original file fingerprints (bytes, ownership and modes), source-version auto-detection through restricted files, failed credentials, backup-only without a target, encrypted backup verification and wrong age identities, role/grant preservation, multiple databases, sequences, pgcrypto ciphertext/decryption, target PGDATA owner/mode, target startup under the original UID/GID, overwrite refusal and rollback. No production data or keys are required.
+
+The integration suite also checks default parent-mount rejection, opt-in acceptance of an inert parent-mounted container, and continued rejection of direct and descendant mounts with the override.
 
 ## Release criteria
 

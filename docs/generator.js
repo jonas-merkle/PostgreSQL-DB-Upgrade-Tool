@@ -38,6 +38,7 @@ function makeCommand(o) {
   if (o.passwordFile) args.push(`--password-file ${quote(o.passwordFile)}`);
   if (o.workDir) args.push(`--work-dir ${quote(o.workDir)}`);
   if (o.requireEncrypted) args.push("--require-encrypted-storage");
+  if (o.allowParentMounts) args.push("--allow-parent-mounts");
   if (o.encrypt) {
     args.push("--encrypt-backup");
     if (o.identity) args.push(`--identity-file ${quote(o.identity)}`);
@@ -83,6 +84,7 @@ if (typeof document !== "undefined") {
       const o = Object.fromEntries(keys.map((key) => [key, el(key).value]));
       o.encrypt = el("encrypt").checked;
       o.requireEncrypted = el("requireEncrypted").checked;
+      o.allowParentMounts = el("allowParentMounts").checked;
       output.value = makeCommand(o);
       copy.disabled = false;
       status.textContent = "Review this command before running it on the Docker host.";

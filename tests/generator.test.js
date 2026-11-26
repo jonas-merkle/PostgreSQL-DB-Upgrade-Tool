@@ -36,6 +36,12 @@ assert.match(
   /--identity-file/,
 );
 assert.doesNotMatch(makeCommand({ ...defaults, identity: "/keys/private" }), /identity/);
+assert.doesNotMatch(makeCommand(defaults), /--allow-parent-mounts/);
+assert.match(makeCommand({ ...defaults, allowParentMounts: true }), /--allow-parent-mounts/);
+assert.match(
+  makeCommand({ ...defaults, mode: "backup", allowParentMounts: true }),
+  /--allow-parent-mounts/,
+);
 const cmd = makeCommand({ ...defaults, source: tricky });
 // Substitute an argument-printing function for the actual script; no Docker work.
 const shell = cmd.replace(/^\.\/migrate\.sh/, "capture");
